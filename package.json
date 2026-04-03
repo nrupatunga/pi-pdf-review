@@ -1,0 +1,37 @@
+{
+  "name": "pi-pdf-review",
+  "version": "0.1.0",
+  "description": "Native PDF review window for Pi with text selection comments",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pdf",
+    "annotation",
+    "review",
+    "glimpse"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "postinstall": "node ./scripts/ensure-glimpse-chromium-backend.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "@embedpdf/pdfium": "^2.12.1",
+    "glimpseui": "github:hazat/glimpse"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
+  }
+}
