@@ -235,16 +235,7 @@ export default function pdfReviewExtension(pi: ExtensionAPI) {
       }
 
       const items = reviews.map((r) => {
-        const highlights = r.comments.filter((c) => c.kind === "highlight").length;
-        const questions = r.comments.filter((c) => c.kind === "question").length;
-        const notes = r.comments.filter((c) => c.kind === "note").length;
-        const parts: string[] = [];
-        if (highlights > 0) parts.push(`${highlights}h`);
-        if (questions > 0) parts.push(`${questions}q`);
-        if (notes > 0) parts.push(`${notes}n`);
-        const counts = parts.length > 0 ? ` [${parts.join(" ")}]` : "";
-        const date = new Date(r.lastOpened).toLocaleDateString();
-        return `${r.title}${counts} — ${date} — ${r.source}`;
+        return `${r.title}\n  ${r.source}`;
       });
 
       const selected = await ctx.ui.select("PDF Reviews", items);
