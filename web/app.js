@@ -410,7 +410,6 @@ function saveInlineComment() {
   };
   state.comments.push(comment);
   state.focusedCommentId = comment.id;
-  setCommentsDrawerOpen(true);
   renderCommentList(); renderAllMarkers();
   closeInlineComment();
   state.dragState = null; clearSelectionHighlight();
