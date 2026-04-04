@@ -234,9 +234,7 @@ export default function pdfReviewExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const items = reviews.map((r) => {
-        return `${r.title}\n  ${r.source}`;
-      });
+      const items = reviews.map((r) => `pdf: ${r.title}`);
 
       const selected = await ctx.ui.select("PDF Reviews", items);
       if (selected == null) return;
