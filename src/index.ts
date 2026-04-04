@@ -4,6 +4,7 @@ import { basename, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { open, type GlimpseWindow } from "glimpseui";
 import { startPdfReviewServer, type PdfReviewServer } from "./server.js";
+import { listReviews } from "./storage.js";
 import type {
   PdfAnnotationComment,
   PdfReviewAskPayload,
@@ -217,6 +218,44 @@ export default function pdfReviewExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       try {
         await reviewPdf(ctx, args);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`PDF review failed: ${message}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("pdf-list", {
+    description: "List previously reviewed PDFs.",
+    handler: async (_args, ctx) => {
+      const reviews = listReviews();
+      if (reviews.length === 0) {
+        ctx.ui.notify("No PDF reviews saved yet.", "info");
+        return;
+      }
+
+      const items = reviews.map((r) => {
+        const highlights = r.comments.filter((c) => c.kind === "highlight").length;
+        const questions = r.comments.filter((c) => c.kind === "question").length;
+        const notes = r.comments.filter((c) => c.kind === "note").length;
+        const parts: string[] = [];
+        if (highlights > 0) parts.push(`${highlights}h`);
+        if (questions > 0) parts.push(`${questions}q`);
+        if (notes > 0) parts.push(`${notes}n`);
+        const counts = parts.length > 0 ? ` [${parts.join(" ")}]` : "";
+        const date = new Date(r.lastOpened).toLocaleDateString();
+        return `${r.title}${counts} — ${date} — ${r.source}`;
+      });
+
+      const selected = await ctx.ui.select("PDF Reviews", items);
+      if (selected == null) return;
+
+      const idx = items.indexOf(selected);
+      if (idx < 0) return;
+
+      const review = reviews[idx];
+      try {
+        await reviewPdf(ctx, review.source);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`PDF review failed: ${message}`, "error");
