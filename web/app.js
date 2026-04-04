@@ -68,6 +68,15 @@ function sendToExtension(payload) {
   if (window.glimpse?.send) { window.glimpse.send(payload); return; }
   console.warn("glimpse bridge unavailable", payload);
 }
+
+let toastTimer = null;
+function showToast(text, duration = 2000) {
+  const el = document.getElementById("toast");
+  el.textContent = text;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), duration);
+}
 function closeWindow(payload) {
   if (window.glimpse?.send) { window.glimpse.send(payload); window.glimpse.close(); return; }
 }
@@ -436,7 +445,8 @@ function askPi() {
   for (const c of unsent) c.sent = true;
   renderCommentList();
   renderAllMarkers();
-  setStatus(`Sent ${unsent.length} note(s) to Pi`);
+  showToast(`Sent ${unsent.length} note${unsent.length > 1 ? "s" : ""} to Pi`);
+  setStatus("Ready");
 }
 
 function closeReview() {
