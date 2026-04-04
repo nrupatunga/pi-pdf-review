@@ -199,6 +199,128 @@ function getCharRects(pdfium, docPtr, pageIndex, startIdx, endIdx, cssWidth, css
   }));
 }
 
+// ─── Link hover tooltip ───
+
+const tooltipEl = document.createElement("div");
+tooltipEl.className = "link-tooltip";
+tooltipEl.style.display = "none";
+document.body.appendChild(tooltipEl);
+
+function getLinkAtPoint(pdfium, docPtr, pageIndex, pdfX, pdfY) {
+  const pagePtr = pdfium.FPDF_LoadPage(docPtr, pageIndex);
+  if (!pagePtr) return null;
+  try {
+    const linkPtr = pdfium.FPDFLink_GetLinkAtPoint(pagePtr, pdfX, pdfY);
+    if (!linkPtr) return null;
+
+    // Check for URL action first
+    const actionPtr = pdfium.FPDFLink_GetAction(linkPtr);
+    if (actionPtr) {
+      const actionType = pdfium.FPDFAction_GetType(actionPtr);
+      // PDFACTION_URI = 3
+      if (actionType === 3) {
+        const bufLen = pdfium.FPDFAction_GetURIPath(docPtr, actionPtr, 0, 0);
+        if (bufLen > 0) {
+          const buf = pdfium.pdfium._malloc(bufLen);
+          pdfium.FPDFAction_GetURIPath(docPtr, actionPtr, buf, bufLen);
+          const uri = new TextDecoder().decode(new Uint8Array(pdfium.pdfium.HEAPU8.buffer, buf, bufLen - 1));
+          pdfium.pdfium._free(buf);
+          return { kind: "url", url: uri };
+        }
+      }
+      // PDFACTION_GOTO = 1 (internal navigation)
+      if (actionType === 1) {
+        const destPtr = pdfium.FPDFAction_GetDest(docPtr, actionPtr);
+        if (destPtr) {
+          const destPage = pdfium.FPDFDest_GetDestPageIndex(docPtr, destPtr);
+          if (destPage >= 0) {
+            const text = extractTextAroundDest(pdfium, docPtr, destPage);
+            return { kind: "ref", page: destPage + 1, text };
+          }
+        }
+      }
+    }
+
+    // Check direct destination
+    const destPtr = pdfium.FPDFLink_GetDest(docPtr, linkPtr);
+    if (destPtr) {
+      const destPage = pdfium.FPDFDest_GetDestPageIndex(docPtr, destPtr);
+      if (destPage >= 0) {
+        const text = extractTextAroundDest(pdfium, docPtr, destPage);
+        return { kind: "ref", page: destPage + 1, text };
+      }
+    }
+
+    return null;
+  } finally {
+    pdfium.FPDF_ClosePage(pagePtr);
+  }
+}
+
+// Cache extracted reference text per page to avoid repeated extraction
+const refTextCache = new Map();
+
+function extractTextAroundDest(pdfium, docPtr, pageIndex) {
+  if (refTextCache.has(pageIndex)) return refTextCache.get(pageIndex);
+
+  const pagePtr = pdfium.FPDF_LoadPage(docPtr, pageIndex);
+  if (!pagePtr) return "";
+  try {
+    const tp = pdfium.FPDFText_LoadPage(pagePtr);
+    if (!tp) return "";
+    try {
+      const count = pdfium.FPDFText_CountChars(tp);
+      const extract = Math.min(count, 500);
+      if (extract <= 0) return "";
+      const bufPtr = pdfium.pdfium._malloc((extract + 1) * 2);
+      try {
+        pdfium.FPDFText_GetText(tp, 0, extract, bufPtr);
+        const text = String.fromCharCode(...new Uint16Array(pdfium.pdfium.HEAPU8.buffer, bufPtr, extract))
+          .replace(/\s+/g, " ").trim();
+        refTextCache.set(pageIndex, text);
+        return text;
+      } finally { pdfium.pdfium._free(bufPtr); }
+    } finally { pdfium.FPDFText_ClosePage(tp); }
+  } finally { pdfium.FPDF_ClosePage(pagePtr); }
+}
+
+let tooltipTimeout = null;
+let lastTooltipKey = "";
+
+function showLinkTooltip(info, mouseX, mouseY) {
+  let content;
+  if (info.kind === "url") {
+    content = info.url;
+  } else {
+    content = info.text ? clampText(info.text, 300) : `Page ${info.page}`;
+  }
+
+  const key = content;
+  if (key === lastTooltipKey && tooltipEl.style.display === "block") return;
+  lastTooltipKey = key;
+
+  tooltipEl.textContent = content;
+  tooltipEl.style.display = "block";
+  tooltipEl.style.left = `${mouseX + 12}px`;
+  tooltipEl.style.top = `${mouseY + 12}px`;
+
+  // Clamp to viewport
+  requestAnimationFrame(() => {
+    const rect = tooltipEl.getBoundingClientRect();
+    if (rect.right > window.innerWidth - 8) {
+      tooltipEl.style.left = `${mouseX - rect.width - 8}px`;
+    }
+    if (rect.bottom > window.innerHeight - 8) {
+      tooltipEl.style.top = `${mouseY - rect.height - 8}px`;
+    }
+  });
+}
+
+function hideTooltip() {
+  tooltipEl.style.display = "none";
+  lastTooltipKey = "";
+}
+
 // ─── Selection highlight ───
 
 function renderSelectionHighlight(pageNumber) {
@@ -518,13 +640,40 @@ function createPageShell(pageNumber) {
   });
 
   interactionLayer.addEventListener("mousemove", (e) => {
-    if (!state.dragState || state.dragState.pageNumber !== pageNumber) return;
-    if (!(e.buttons & 1)) return;
+    // Drag selection
+    if (state.dragState && state.dragState.pageNumber === pageNumber && (e.buttons & 1)) {
+      const rect = stage.getBoundingClientRect();
+      const dims = state.dragState.pageDims;
+      const { pdfX, pdfY } = cssToPageCoords(e.clientX - rect.left, e.clientY - rect.top, stage.offsetWidth, stage.offsetHeight, dims.w, dims.h);
+      const idx = getTextAtPoint(state.pdfium, state.docPtr, pageNumber - 1, pdfX, pdfY);
+      if (idx >= 0) { state.dragState.endIdx = idx; renderSelectionHighlight(pageNumber); }
+      hideTooltip();
+      return;
+    }
+
+    // Link hover tooltip (not dragging)
+    if (!state.pdfium || !state.docPtr || isInlineOpen()) return;
     const rect = stage.getBoundingClientRect();
-    const dims = state.dragState.pageDims;
+    const dims = getPageDimsPts(state.pdfium, state.docPtr, pageNumber - 1);
     const { pdfX, pdfY } = cssToPageCoords(e.clientX - rect.left, e.clientY - rect.top, stage.offsetWidth, stage.offsetHeight, dims.w, dims.h);
-    const idx = getTextAtPoint(state.pdfium, state.docPtr, pageNumber - 1, pdfX, pdfY);
-    if (idx >= 0) { state.dragState.endIdx = idx; renderSelectionHighlight(pageNumber); }
+
+    clearTimeout(tooltipTimeout);
+    tooltipTimeout = setTimeout(() => {
+      const info = getLinkAtPoint(state.pdfium, state.docPtr, pageNumber - 1, pdfX, pdfY);
+      if (info) {
+        showLinkTooltip(info, e.clientX, e.clientY);
+        interactionLayer.style.cursor = "pointer";
+      } else {
+        hideTooltip();
+        interactionLayer.style.cursor = "text";
+      }
+    }, 80);
+  });
+
+  interactionLayer.addEventListener("mouseleave", () => {
+    clearTimeout(tooltipTimeout);
+    hideTooltip();
+    interactionLayer.style.cursor = "text";
   });
 
   interactionLayer.addEventListener("mouseup", () => {
