@@ -21,10 +21,13 @@ export interface PdfSelectionRect {
 
 export interface PdfAnnotationComment {
   id: string;
+  kind: "highlight" | "question" | "note";
   pageNumber: number;
   quote: string;
   comment: string;
   rects: PdfSelectionRect[];
+  startIdx?: number;
+  endIdx?: number;
   createdAt: number;
   sent?: boolean;
 }

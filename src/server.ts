@@ -2,7 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { PdfReviewBootData } from "./types.js";
+import type { PdfAnnotationComment, PdfReviewBootData } from "./types.js";
+import { loadReview, saveReview } from "./storage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const webDir = join(__dirname, "..", "web");
@@ -42,15 +43,44 @@ export function startPdfReviewServer(data: PdfReviewBootData): Promise<PdfReview
       .replace("__INLINE_DATA__", bootPayload)
       .replace("__INLINE_JS__", "/* loaded via /app.js */");
 
+    // Load existing review data
+    const existing = loadReview(data.source.input);
+    const savedComments = existing?.comments ?? [];
+
     const routes: Record<string, { body: Buffer | string; mime: string }> = {
       "/": { body: indexHtml, mime: MIME[".html"] },
       "/app.js": { body: appJs, mime: MIME[".js"] },
       "/pdfium.js": { body: pdfiumJs, mime: MIME[".js"] },
       "/pdfium.wasm": { body: pdfiumWasm, mime: MIME[".wasm"] },
+      "/saved-comments": { body: JSON.stringify(savedComments), mime: MIME[".json"] },
     };
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       const url = req.url ?? "/";
+
+      // Handle save endpoint
+      if (url === "/save" && req.method === "POST") {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          try {
+            const comments = JSON.parse(body) as PdfAnnotationComment[];
+            saveReview({
+              source: data.source.input,
+              title: data.source.title,
+              lastOpened: Date.now(),
+              comments,
+            });
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true }));
+          } catch (err) {
+            res.writeHead(400);
+            res.end("Bad request");
+          }
+        });
+        return;
+      }
+
       const route = routes[url];
 
       if (!route) {

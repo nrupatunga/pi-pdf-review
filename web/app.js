@@ -25,25 +25,28 @@ const state = {
   pageCount: 0,
   scale: 1.5,
   renderVersion: 0,
-  comments: [],       // { id, kind, pageNumber, quote, comment, rects, createdAt, sent }
+  comments: [],       // { id, kind, pageNumber, quote, comment, rects, createdAt, sent, startIdx, endIdx }
   pendingSelection: null,
   focusedCommentId: null,
   commentsDrawerOpen: false,
   dragState: null,
   inlineKind: "question", // "question" or "note"
   pageRefs: new Map(),
+  saving: false,
 };
 
 // ─── Utilities ───
 
 function setStatus(text) { statusPillEl.textContent = text; }
 function setCommentCount() {
+  const highlights = state.comments.filter(c => c.kind === "highlight").length;
   const questions = state.comments.filter(c => c.kind === "question");
-  const notes = state.comments.filter(c => c.kind === "note");
+  const notes = state.comments.filter(c => c.kind === "note").length;
   const unsent = questions.filter(c => !c.sent).length;
   const parts = [];
+  if (highlights > 0) parts.push(`${highlights}h`);
   if (questions.length > 0) parts.push(`${unsent > 0 ? unsent + "/" : ""}${questions.length}q`);
-  if (notes.length > 0) parts.push(`${notes.length}n`);
+  if (notes > 0) parts.push(`${notes}n`);
   commentCountEl.textContent = parts.join(" ") || "0";
 }
 function setCommentsDrawerOpen(open) {
@@ -72,6 +75,18 @@ function escapeHtml(value) {
 function sendToExtension(payload) {
   if (window.glimpse?.send) { window.glimpse.send(payload); return; }
   console.warn("glimpse bridge unavailable", payload);
+}
+
+let saveDebounce = null;
+function autoSave() {
+  clearTimeout(saveDebounce);
+  saveDebounce = setTimeout(() => {
+    fetch("/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.comments),
+    }).catch(() => {});
+  }, 500);
 }
 
 let toastTimer = null;
@@ -399,6 +414,41 @@ function clearSelectionHighlight() {
   for (const refs of state.pageRefs.values()) refs.highlightLayer.innerHTML = "";
 }
 
+function renderPageSavedHighlights(pageNumber) {
+  const refs = state.pageRefs.get(pageNumber);
+  if (!refs || !state.pdfium || !state.docPtr) return;
+
+  // Remove old saved highlights (keep sel-rect for active selection)
+  refs.highlightLayer.querySelectorAll(".saved-highlight").forEach(el => el.remove());
+
+  const items = state.comments.filter(c =>
+    c.pageNumber === pageNumber && c.startIdx != null && c.endIdx != null
+  );
+
+  for (const item of items) {
+    const rects = getCharRects(state.pdfium, state.docPtr, pageNumber - 1,
+      item.startIdx, item.endIdx, refs.stage.offsetWidth, refs.stage.offsetHeight);
+    const isHighlightOnly = item.kind === "highlight";
+    const isFocused = state.focusedCommentId === item.id;
+    for (const r of rects) {
+      const div = document.createElement("div");
+      div.className = "saved-highlight";
+      div.dataset.commentId = item.id;
+      const color = isHighlightOnly
+        ? (isFocused ? "rgba(250, 204, 21, 0.28)" : "rgba(250, 204, 21, 0.16)")
+        : item.kind === "question"
+          ? (isFocused ? "rgba(34, 197, 94, 0.25)" : "rgba(34, 197, 94, 0.12)")
+          : (isFocused ? "rgba(245, 158, 11, 0.25)" : "rgba(245, 158, 11, 0.12)");
+      div.style.cssText = `position:absolute;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;background:${color};border-radius:2px;pointer-events:none;`;
+      refs.highlightLayer.appendChild(div);
+    }
+  }
+}
+
+function renderAllSavedHighlights() {
+  for (const pn of state.pageRefs.keys()) renderPageSavedHighlights(pn);
+}
+
 function syncSelectionState() {
   if (isInlineOpen()) return;
   if (state.dragState && state.dragState.startIdx >= 0 && state.dragState.endIdx >= 0 &&
@@ -406,11 +456,32 @@ function syncSelectionState() {
     const quote = getTextBetween(state.pdfium, state.docPtr, state.dragState.pageNumber - 1,
       state.dragState.startIdx, state.dragState.endIdx).replace(/\s+/g, " ").trim();
     if (quote && quote.length > 1) {
-      state.pendingSelection = { kind: "ready", pageNumber: state.dragState.pageNumber, quote };
+      state.pendingSelection = {
+        kind: "ready", pageNumber: state.dragState.pageNumber, quote,
+        startIdx: state.dragState.startIdx, endIdx: state.dragState.endIdx,
+      };
       commentSelectionButton.disabled = false;
-      setStatus(`Selection · page ${state.dragState.pageNumber}`);
-      // Auto-open inline input as question
-      openInlineComment("question");
+
+      // Auto-save as highlight
+      const highlight = {
+        id: `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: "highlight",
+        pageNumber: state.dragState.pageNumber,
+        quote,
+        comment: "",
+        rects: [],
+        startIdx: Math.min(state.dragState.startIdx, state.dragState.endIdx),
+        endIdx: Math.max(state.dragState.startIdx, state.dragState.endIdx),
+        createdAt: Date.now(),
+        sent: false,
+      };
+      state.comments.push(highlight);
+      state.focusedCommentId = highlight.id;
+      renderCommentList();
+      renderAllMarkers();
+      renderAllSavedHighlights();
+      autoSave();
+      setStatus(`Highlighted · page ${state.dragState.pageNumber}`);
       return;
     }
   }
@@ -425,6 +496,7 @@ function focusComment(commentId) {
   state.focusedCommentId = commentId;
   renderCommentList();
   renderAllMarkers();
+  renderAllSavedHighlights();
 }
 
 function focusNextComment(direction) {
@@ -450,7 +522,9 @@ function deleteFocusedComment() {
   state.focusedCommentId = state.comments[Math.min(idx, state.comments.length - 1)]?.id ?? null;
   renderCommentList();
   renderAllMarkers();
-  setStatus("Note deleted");
+  renderAllSavedHighlights();
+  autoSave();
+  setStatus("Deleted");
 }
 
 function renderPageMarkers(pageNumber) {
@@ -596,7 +670,8 @@ function saveInlineComment() {
       comment.kind = state.inlineKind;
       if (comment.kind === "question") comment.sent = false;
       state.focusedCommentId = comment.id;
-      renderCommentList(); renderAllMarkers();
+      renderCommentList(); renderAllMarkers(); renderAllSavedHighlights();
+      autoSave();
       setStatus(`Edited ${state.inlineKind} · page ${comment.pageNumber}`);
     }
     closeInlineComment();
@@ -604,16 +679,39 @@ function saveInlineComment() {
   }
 
   if (!state.pendingSelection) return;
+
+  // If the focused item is a highlight we just made, upgrade it
+  const existingHighlight = state.comments.find(c =>
+    c.id === state.focusedCommentId && c.kind === "highlight" &&
+    c.pageNumber === state.pendingSelection.pageNumber &&
+    c.quote === state.pendingSelection.quote
+  );
+
+  if (existingHighlight) {
+    existingHighlight.kind = state.inlineKind;
+    existingHighlight.comment = body;
+    if (state.inlineKind === "question") existingHighlight.sent = false;
+    renderCommentList(); renderAllMarkers(); renderAllSavedHighlights();
+    autoSave();
+    closeInlineComment();
+    setStatus(`Saved ${state.inlineKind} · page ${existingHighlight.pageNumber}`);
+    return;
+  }
+
   const comment = {
     id: `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: state.inlineKind,
     pageNumber: state.pendingSelection.pageNumber,
     quote: state.pendingSelection.quote,
-    comment: body, rects: [], createdAt: Date.now(), sent: false,
+    comment: body, rects: [],
+    startIdx: state.pendingSelection.startIdx,
+    endIdx: state.pendingSelection.endIdx,
+    createdAt: Date.now(), sent: false,
   };
   state.comments.push(comment);
   state.focusedCommentId = comment.id;
-  renderCommentList(); renderAllMarkers();
+  renderCommentList(); renderAllMarkers(); renderAllSavedHighlights();
+  autoSave();
   closeInlineComment();
   state.dragState = null; clearSelectionHighlight();
   state.pendingSelection = null;
@@ -647,6 +745,7 @@ function askPi() {
   for (const c of unsent) c.sent = true;
   renderCommentList();
   renderAllMarkers();
+  autoSave();
   showToast(`Sent ${unsent.length} question${unsent.length > 1 ? "s" : ""} to Pi`);
   setStatus("Ready");
 }
@@ -765,7 +864,7 @@ async function renderDocument() {
   }
   if (version !== state.renderVersion) return;
   setStatus("Ready");
-  renderCommentList(); renderAllMarkers();
+  renderCommentList(); renderAllMarkers(); renderAllSavedHighlights();
 }
 
 // ─── Boot ───
@@ -774,6 +873,14 @@ async function bootPdfReview() {
   try {
     docTitleEl.textContent = boot.source.title;
     docSubtitleEl.textContent = boot.source.displayName;
+    // Load saved comments
+    try {
+      const saved = await (await fetch("/saved-comments")).json();
+      if (Array.isArray(saved) && saved.length > 0) {
+        state.comments = saved;
+        showToast(`Restored ${saved.length} saved annotation${saved.length > 1 ? "s" : ""}`);
+      }
+    } catch {}
     setCommentCount(); renderCommentList();
     setStatus("Loading PDFium…");
     const wasmBinary = await (await fetch("/pdfium.wasm")).arrayBuffer();
