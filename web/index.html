@@ -325,6 +325,27 @@
       opacity: 0.7;
     }
 
+    .comment-kind {
+      display: inline-block;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 1px 5px;
+      border-radius: 3px;
+      margin-left: 6px;
+    }
+
+    .comment-kind.question {
+      color: #22c55e;
+      background: rgba(34, 197, 94, 0.1);
+    }
+
+    .comment-kind.note {
+      color: #f59e0b;
+      background: rgba(245, 158, 11, 0.1);
+    }
+
     .comment-page {
       font-size: 10px;
       letter-spacing: 0.06em;
@@ -377,6 +398,25 @@
 
     .inline-comment.open {
       display: flex;
+    }
+
+    .inline-comment-mode {
+      padding: 5px 10px 4px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #22c55e;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .inline-comment-mode:hover {
+      text-decoration: underline;
+    }
+
+    .inline-comment-mode.note {
+      color: #f59e0b;
     }
 
     .inline-comment-quote {
@@ -517,8 +557,10 @@
     <div class="help-card">
       <h3>Keyboard shortcuts</h3>
       <table>
-        <tr><td>a</td><td>Add comment on selection</td></tr>
-        <tr><td>Enter</td><td>Save comment / Ask Pi</td></tr>
+        <tr><td>select</td><td>Auto-opens question input</td></tr>
+        <tr><td>Tab</td><td>Toggle question / note (in input)</td></tr>
+        <tr><td>Enter</td><td>Save / Ask Pi (send questions)</td></tr>
+        <tr><td>a</td><td>Open question on selection</td></tr>
         <tr><td>e</td><td>Edit focused note</td></tr>
         <tr><td>d</td><td>Delete focused note</td></tr>
         <tr><td>n / p</td><td>Next / previous note</td></tr>
@@ -534,9 +576,10 @@
   <div class="toast" id="toast"></div>
 
   <div class="inline-comment" id="inline-comment">
+    <div class="inline-comment-mode" id="inline-mode">Question</div>
     <div class="inline-comment-quote" id="inline-quote"></div>
-    <input class="inline-comment-input" id="inline-input" type="text" placeholder="Note or question…" autocomplete="off" />
-    <div class="inline-comment-hint">Enter save · Esc cancel</div>
+    <input class="inline-comment-input" id="inline-input" type="text" placeholder="Ask Pi about this…" autocomplete="off" />
+    <div class="inline-comment-hint">Enter save · Tab toggle question/note · Esc cancel</div>
   </div>
 
   <script>

@@ -25,11 +25,12 @@ const state = {
   pageCount: 0,
   scale: 1.5,
   renderVersion: 0,
-  comments: [],       // { id, pageNumber, quote, comment, rects, createdAt, sent }
+  comments: [],       // { id, kind, pageNumber, quote, comment, rects, createdAt, sent }
   pendingSelection: null,
   focusedCommentId: null,
   commentsDrawerOpen: false,
   dragState: null,
+  inlineKind: "question", // "question" or "note"
   pageRefs: new Map(),
 };
 
@@ -37,9 +38,13 @@ const state = {
 
 function setStatus(text) { statusPillEl.textContent = text; }
 function setCommentCount() {
-  const unsent = state.comments.filter(c => !c.sent).length;
-  const total = state.comments.length;
-  commentCountEl.textContent = unsent > 0 ? `${unsent}/${total}` : String(total);
+  const questions = state.comments.filter(c => c.kind === "question");
+  const notes = state.comments.filter(c => c.kind === "note");
+  const unsent = questions.filter(c => !c.sent).length;
+  const parts = [];
+  if (questions.length > 0) parts.push(`${unsent > 0 ? unsent + "/" : ""}${questions.length}q`);
+  if (notes.length > 0) parts.push(`${notes.length}n`);
+  commentCountEl.textContent = parts.join(" ") || "0";
 }
 function setCommentsDrawerOpen(open) {
   state.commentsDrawerOpen = open;
@@ -219,13 +224,16 @@ function clearSelectionHighlight() {
 
 function syncSelectionState() {
   if (isInlineOpen()) return;
-  if (state.dragState && state.dragState.startIdx >= 0 && state.dragState.endIdx >= 0) {
+  if (state.dragState && state.dragState.startIdx >= 0 && state.dragState.endIdx >= 0 &&
+      state.dragState.startIdx !== state.dragState.endIdx) {
     const quote = getTextBetween(state.pdfium, state.docPtr, state.dragState.pageNumber - 1,
       state.dragState.startIdx, state.dragState.endIdx).replace(/\s+/g, " ").trim();
-    if (quote) {
+    if (quote && quote.length > 1) {
       state.pendingSelection = { kind: "ready", pageNumber: state.dragState.pageNumber, quote };
       commentSelectionButton.disabled = false;
       setStatus(`Selection · page ${state.dragState.pageNumber}`);
+      // Auto-open inline input as question
+      openInlineComment("question");
       return;
     }
   }
@@ -305,8 +313,9 @@ function renderCommentList() {
   for (const comment of state.comments) {
     const card = document.createElement("div");
     card.className = `comment-card${state.focusedCommentId === comment.id ? " active" : ""}${comment.sent ? " sent" : ""}`;
+    const kindLabel = comment.kind === "note" ? "note" : "question";
     card.innerHTML = `
-      <div class="comment-page">Page ${comment.pageNumber}${comment.sent ? " · sent" : ""}</div>
+      <div class="comment-page">Page ${comment.pageNumber}<span class="comment-kind ${kindLabel}">${kindLabel}</span>${comment.sent ? " · sent" : ""}</div>
       <div class="comment-quote">"${escapeHtml(clampText(comment.quote, 200))}"</div>
       <div class="comment-body">${escapeHtml(comment.comment)}</div>
       <div class="comment-card-actions">
@@ -335,6 +344,19 @@ function renderCommentList() {
 
 // editingCommentId: when set, we're editing an existing comment instead of creating new
 let editingCommentId = null;
+const inlineModeEl = document.getElementById("inline-mode");
+
+function updateInlineMode() {
+  const isNote = state.inlineKind === "note";
+  inlineModeEl.textContent = isNote ? "Note" : "Question";
+  inlineModeEl.className = `inline-comment-mode${isNote ? " note" : ""}`;
+  inlineInputEl.placeholder = isNote ? "Your understanding…" : "Ask Pi about this…";
+}
+
+function toggleInlineKind() {
+  state.inlineKind = state.inlineKind === "question" ? "note" : "question";
+  updateInlineMode();
+}
 
 function positionInlineOnPage(pageNumber, fallbackTop, fallbackLeft) {
   const refs = state.pageRefs.get(pageNumber);
@@ -348,9 +370,11 @@ function positionInlineOnPage(pageNumber, fallbackTop, fallbackLeft) {
   inlineCommentEl.style.left = `${left}px`;
 }
 
-function openInlineComment() {
+function openInlineComment(kind) {
   if (!state.pendingSelection || !state.dragState) return;
   editingCommentId = null;
+  state.inlineKind = kind || "question";
+  updateInlineMode();
   const refs = state.pageRefs.get(state.dragState.pageNumber);
   if (!refs) return;
   const rects = getCharRects(state.pdfium, state.docPtr, state.dragState.pageNumber - 1,
@@ -368,6 +392,8 @@ function openInlineComment() {
 
 function openEditComment(comment) {
   editingCommentId = comment.id;
+  state.inlineKind = comment.kind || "question";
+  updateInlineMode();
   positionInlineOnPage(comment.pageNumber);
   inlineQuoteEl.textContent = `"${clampText(comment.quote, 120)}" — page ${comment.pageNumber}`;
   inlineInputEl.value = comment.comment;
@@ -387,23 +413,23 @@ function saveInlineComment() {
   if (!body) { inlineInputEl.focus(); return; }
 
   if (editingCommentId) {
-    // Edit existing
     const comment = state.comments.find(c => c.id === editingCommentId);
     if (comment) {
       comment.comment = body;
-      comment.sent = false; // mark as unsent again after edit
+      comment.kind = state.inlineKind;
+      if (comment.kind === "question") comment.sent = false;
       state.focusedCommentId = comment.id;
       renderCommentList(); renderAllMarkers();
-      setStatus(`Edited note · page ${comment.pageNumber}`);
+      setStatus(`Edited ${state.inlineKind} · page ${comment.pageNumber}`);
     }
     closeInlineComment();
     return;
   }
 
-  // Create new
   if (!state.pendingSelection) return;
   const comment = {
     id: `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: state.inlineKind,
     pageNumber: state.pendingSelection.pageNumber,
     quote: state.pendingSelection.quote,
     comment: body, rects: [], createdAt: Date.now(), sent: false,
@@ -415,7 +441,7 @@ function saveInlineComment() {
   state.dragState = null; clearSelectionHighlight();
   state.pendingSelection = null;
   commentSelectionButton.disabled = true;
-  setStatus(`Saved note · page ${comment.pageNumber}`);
+  setStatus(`Saved ${state.inlineKind} · page ${comment.pageNumber}`);
 }
 
 function editFocusedComment() {
@@ -427,12 +453,12 @@ function editFocusedComment() {
 // ─── Ask Pi ───
 
 function askPi() {
-  const unsent = state.comments.filter(c => !c.sent);
+  const unsent = state.comments.filter(c => c.kind === "question" && !c.sent);
   if (unsent.length === 0) {
-    setStatus("No new notes to send");
+    setStatus("No new questions to send");
     return;
   }
-  const totalSent = state.comments.filter(c => c.sent).length;
+  const totalSent = state.comments.filter(c => c.kind === "question" && c.sent).length;
 
   sendToExtension({
     type: "ask",
@@ -444,7 +470,7 @@ function askPi() {
   for (const c of unsent) c.sent = true;
   renderCommentList();
   renderAllMarkers();
-  showToast(`Sent ${unsent.length} note${unsent.length > 1 ? "s" : ""} to Pi`);
+  showToast(`Sent ${unsent.length} question${unsent.length > 1 ? "s" : ""} to Pi`);
   setStatus("Ready");
 }
 
@@ -581,7 +607,11 @@ helpOverlay.addEventListener("click", (e) => { if (e.target === helpOverlay) tog
 inlineInputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveInlineComment(); }
   if (e.key === "Escape") { e.preventDefault(); closeInlineComment(); }
+  if (e.key === "Tab") { e.preventDefault(); toggleInlineKind(); }
 });
+
+// Click mode label to toggle
+inlineModeEl.addEventListener("click", toggleInlineKind);
 
 document.addEventListener("keydown", (event) => {
   if (isInlineOpen()) return;
