@@ -234,7 +234,7 @@ function getLinkAtPoint(pdfium, docPtr, pageIndex, pdfX, pdfY) {
         if (destPtr) {
           const destPage = pdfium.FPDFDest_GetDestPageIndex(docPtr, destPtr);
           if (destPage >= 0) {
-            const text = extractTextAroundDest(pdfium, docPtr, destPage);
+            const text = extractTextAtDestination(pdfium, docPtr, destPtr, destPage);
             return { kind: "ref", page: destPage + 1, text };
           }
         }
@@ -246,7 +246,7 @@ function getLinkAtPoint(pdfium, docPtr, pageIndex, pdfX, pdfY) {
     if (destPtr) {
       const destPage = pdfium.FPDFDest_GetDestPageIndex(docPtr, destPtr);
       if (destPage >= 0) {
-        const text = extractTextAroundDest(pdfium, docPtr, destPage);
+        const text = extractTextAtDestination(pdfium, docPtr, destPtr, destPage);
         return { kind: "ref", page: destPage + 1, text };
       }
     }
@@ -257,28 +257,83 @@ function getLinkAtPoint(pdfium, docPtr, pageIndex, pdfX, pdfY) {
   }
 }
 
-// Cache extracted reference text per page to avoid repeated extraction
-const refTextCache = new Map();
-
-function extractTextAroundDest(pdfium, docPtr, pageIndex) {
-  if (refTextCache.has(pageIndex)) return refTextCache.get(pageIndex);
-
+function extractTextAtDestination(pdfium, docPtr, destPtr, pageIndex) {
   const pagePtr = pdfium.FPDF_LoadPage(docPtr, pageIndex);
   if (!pagePtr) return "";
   try {
     const tp = pdfium.FPDFText_LoadPage(pagePtr);
     if (!tp) return "";
     try {
-      const count = pdfium.FPDFText_CountChars(tp);
-      const extract = Math.min(count, 500);
+      const charCount = pdfium.FPDFText_CountChars(tp);
+      if (charCount <= 0) return "";
+
+      // Get the exact Y location the link points to
+      const hasXPtr = pdfium.pdfium._malloc(4);
+      const hasYPtr = pdfium.pdfium._malloc(4);
+      const hasZoomPtr = pdfium.pdfium._malloc(4);
+      const xPtr = pdfium.pdfium._malloc(4);
+      const yPtr = pdfium.pdfium._malloc(4);
+      const zoomPtr = pdfium.pdfium._malloc(4);
+
+      let startCharIdx = 0;
+
+      const ok = pdfium.FPDFDest_GetLocationInPage(destPtr, hasXPtr, hasYPtr, hasZoomPtr, xPtr, yPtr, zoomPtr);
+      if (ok) {
+        const hasY = pdfium.pdfium.HEAP32[hasYPtr >> 2];
+        if (hasY) {
+          const destY = pdfium.pdfium.HEAPF32[yPtr >> 2];
+          // Find the character nearest to this Y position
+          // PDF Y=0 is bottom, destY is from top in page coords
+          const lp = pdfium.pdfium._malloc(8);
+          const rp = pdfium.pdfium._malloc(8);
+          const bp = pdfium.pdfium._malloc(8);
+          const tp2 = pdfium.pdfium._malloc(8);
+
+          let bestIdx = 0;
+          let bestDist = Infinity;
+
+          // Sample characters to find the one closest to destY
+          const step = Math.max(1, Math.floor(charCount / 200));
+          for (let i = 0; i < charCount; i += step) {
+            const cok = pdfium.FPDFText_GetCharBox(tp, i, lp, rp, bp, tp2);
+            if (!cok) continue;
+            const charTop = pdfium.pdfium.HEAPF64[tp2 >> 3];
+            const dist = Math.abs(charTop - destY);
+            if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+          }
+          // Refine around best
+          const lo = Math.max(0, bestIdx - step);
+          const hi = Math.min(charCount - 1, bestIdx + step);
+          for (let i = lo; i <= hi; i++) {
+            const cok = pdfium.FPDFText_GetCharBox(tp, i, lp, rp, bp, tp2);
+            if (!cok) continue;
+            const charTop = pdfium.pdfium.HEAPF64[tp2 >> 3];
+            const dist = Math.abs(charTop - destY);
+            if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+          }
+
+          startCharIdx = bestIdx;
+          pdfium.pdfium._free(lp);
+          pdfium.pdfium._free(rp);
+          pdfium.pdfium._free(bp);
+          pdfium.pdfium._free(tp2);
+        }
+      }
+
+      pdfium.pdfium._free(hasXPtr);
+      pdfium.pdfium._free(hasYPtr);
+      pdfium.pdfium._free(hasZoomPtr);
+      pdfium.pdfium._free(xPtr);
+      pdfium.pdfium._free(yPtr);
+      pdfium.pdfium._free(zoomPtr);
+
+      const extract = Math.min(charCount - startCharIdx, 300);
       if (extract <= 0) return "";
       const bufPtr = pdfium.pdfium._malloc((extract + 1) * 2);
       try {
-        pdfium.FPDFText_GetText(tp, 0, extract, bufPtr);
-        const text = String.fromCharCode(...new Uint16Array(pdfium.pdfium.HEAPU8.buffer, bufPtr, extract))
+        pdfium.FPDFText_GetText(tp, startCharIdx, extract, bufPtr);
+        return String.fromCharCode(...new Uint16Array(pdfium.pdfium.HEAPU8.buffer, bufPtr, extract))
           .replace(/\s+/g, " ").trim();
-        refTextCache.set(pageIndex, text);
-        return text;
       } finally { pdfium.pdfium._free(bufPtr); }
     } finally { pdfium.FPDFText_ClosePage(tp); }
   } finally { pdfium.FPDF_ClosePage(pagePtr); }
